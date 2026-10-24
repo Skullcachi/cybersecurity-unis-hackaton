@@ -66,6 +66,9 @@ EMPTY_MITRE = {
     "technique_name": None,
     "mitre_mitigation_id": None,
 }
+OUTCOME_RE = re.compile(
+    r"outcome=(attack_completed|patched_after_detection|patched_from_advisory)"
+)
 
 
 def run_hunt(advisory: str, inventory: list[dict[str, Any]], logs: str) -> dict[str, Any]:
@@ -77,6 +80,7 @@ def run_hunt(advisory: str, inventory: list[dict[str, Any]], logs: str) -> dict[
     intel = extract_threat_intel(advisory)
     affected_hosts = assess_hosts(intel, inventory)
     evidence = hunt_logs(intel["iocs"], logs)
+    outcome, response_evidence = read_response(logs, hosts_for_software(intel, inventory))
     return {
         "cve_id": intel["cve_id"],
         "affected_software": intel["affected_software"],
@@ -86,6 +90,8 @@ def run_hunt(advisory: str, inventory: list[dict[str, Any]], logs: str) -> dict[
         "affected_hosts": affected_hosts,
         "threat_detected_in_logs": bool(evidence),
         "detected_log_evidence": evidence,
+        "response_outcome": outcome,
+        "response_evidence": response_evidence,
         "mitre_attack": map_mitre(intel),
         "remediation_script": build_remediation(intel),
     }
@@ -146,15 +152,42 @@ def assess_hosts(intel: dict[str, Any], inventory: list[dict[str, Any]]) -> list
     return hosts
 
 
+def hosts_for_software(intel: dict[str, Any], inventory: list[dict[str, Any]]) -> list[str]:
+    software = intel.get("affected_software")
+    if not software:
+        return []
+    hosts: list[str] = []
+    for asset in inventory:
+        installed = asset.get("software")
+        hostname = asset.get("hostname")
+        if isinstance(installed, str) and hostname and software_matches(software, installed):
+            hosts.append(str(hostname))
+    return hosts
+
+
 def hunt_logs(iocs: list[str], logs: str) -> list[str]:
     evidence: list[str] = []
     for line in logs.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or "outcome=" in line:
             continue
         if any(ioc_in_line(ioc, line) for ioc in iocs):
             evidence.append(line)
     return evidence
+
+
+def read_response(logs: str, hostnames: list[str]) -> tuple[str | None, list[str]]:
+    outcome = None
+    evidence: list[str] = []
+    for line in logs.splitlines():
+        if not any(hostname in line for hostname in hostnames):
+            continue
+        match = OUTCOME_RE.search(line)
+        if match is None:
+            continue
+        evidence.append(line)
+        outcome = match.group(1)
+    return outcome, evidence
 
 
 def map_mitre(intel: dict[str, Any]) -> dict[str, str | None]:

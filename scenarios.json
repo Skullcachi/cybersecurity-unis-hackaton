@@ -9,6 +9,6 @@
   },
   {
     "label": "Node.js Request Smuggling (CVE-2024-27980)",
-    "advisory": "Emergency advisory\nCVE: CVE-2024-27980\nSoftware: Node.js\nVulnerable versions: < 20.12.2\nSeverity: high\nFixed version: 20.12.2\nIoC IP: 203.0.113.105\n\nSummary\nNode.js 20 before 20.12.2 is affected on Windows. Upgrade to 20.12.2.\nSuspicious requests were observed from 203.0.113.105.\n"
+    "advisory": "Emergency advisory\nCVE: CVE-2024-27980\nSoftware: Node.js\nVulnerable versions: < 20.12.2\nSeverity: high\nFixed version: 20.12.2\nIoC IP: 203.0.113.105\n\nSummary\nNode.js 20 before 20.12.2 is affected on Windows. Upgrade to 20.12.2.\nPatch from this advisory. Do not wait for a probe from 203.0.113.105.\n"
   }
 ]
