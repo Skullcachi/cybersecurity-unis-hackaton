@@ -13,6 +13,8 @@ REPORT_KEYS = {
     "affected_hosts",
     "threat_detected_in_logs",
     "detected_log_evidence",
+    "response_outcome",
+    "response_evidence",
     "mitre_attack",
     "remediation_script",
 }
@@ -65,9 +67,21 @@ class ScenarioHuntTests(unittest.TestCase):
         )
         self.assertEqual(report["mitre_attack"]["technique_id"], "T1190")
         self.assertEqual(report["mitre_attack"]["mitre_mitigation_id"], "M1051")
+        self.assertEqual(report["response_outcome"], "attack_completed")
+        self.assertTrue(
+            any("attack_completed" in line for line in report["response_evidence"])
+        )
         self.assertIn("1.26.2", report["remediation_script"])
         self.assertIn("OpenEMR", report["cve_note"])
-        self.assertFalse(report["honeypot"]["engaged"])
+        self.assertTrue(report["honeypot"]["engaged"])
+        self.assertIn("203.0.113.50", report["honeypot"]["targets"])
+        self.assertNotIn("203.0.113.77", report["honeypot"]["targets"])
+        completed = next(item for item in report["attack_patterns"] if item["actor"] == "203.0.113.50")
+        self.assertEqual(completed["tactics"], ["TA0043", "TA0009"])
+        for phase in completed["phases"]:
+            self.assertTrue(phase["remediation"]["preventive"])
+            self.assertTrue(phase["remediation"]["detective"])
+            self.assertTrue(phase["remediation"]["corrective"])
 
     def test_php_cgi_marks_app_host_and_source_ip(self):
         from agent import run_hunt
@@ -78,14 +92,28 @@ class ScenarioHuntTests(unittest.TestCase):
         )
 
         self.assertEqual(report["cve_id"], "CVE-2024-4577")
-        self.assertEqual(report["affected_hosts"], ["app-php-01"])
+        self.assertFalse(report["is_system_vulnerable"])
+        self.assertEqual(report["affected_hosts"], [])
         self.assertTrue(report["threat_detected_in_logs"])
         self.assertTrue(
             any("198.51.100.42" in line for line in report["detected_log_evidence"])
         )
+        self.assertEqual(report["response_outcome"], "patched_after_detection")
+        self.assertTrue(
+            any("app-php-01" in line for line in report["response_evidence"])
+        )
         self.assertEqual(report["mitre_attack"]["technique_id"], "T1190")
         self.assertIn("8.2.20", report["remediation_script"])
-        self.assertNotIn("apt-get", section(report["remediation_script"], "app-php-01"))
+        php_section = section(report["remediation_script"], "app-php-01")
+        self.assertNotIn("apt-get", php_section)
+        self.assertIn("php -v", php_section)
+        self.assertIn("already at 8.2.20", php_section)
+        chain = next(item for item in report["attack_patterns"] if item["actor"] == "198.51.100.42")
+        for tactic in ("TA0043", "TA0042", "TA0001", "TA0002", "TA0009", "TA0010"):
+            self.assertIn(tactic, chain["tactics"])
+        self.assertIn("198.51.100.42", report["honeypot"]["targets"])
+        for phase in chain["phases"]:
+            self.assertTrue(phase["remediation"]["mitigation_ids"])
 
     def test_node_runtime_marks_api_host_and_command_injection_technique(self):
         from agent import run_hunt
@@ -98,11 +126,13 @@ class ScenarioHuntTests(unittest.TestCase):
         )
 
         self.assertEqual(report["cve_id"], "CVE-2024-27980")
-        self.assertEqual(report["affected_hosts"], ["api-node-01"])
-        self.assertTrue(report["threat_detected_in_logs"])
-        self.assertTrue(
+        self.assertFalse(report["is_system_vulnerable"])
+        self.assertEqual(report["affected_hosts"], [])
+        self.assertFalse(report["threat_detected_in_logs"])
+        self.assertFalse(
             any("203.0.113.105" in line for line in report["detected_log_evidence"])
         )
+        self.assertEqual(report["response_outcome"], "patched_from_advisory")
         self.assertEqual(
             report["mitre_attack"],
             {
@@ -113,7 +143,12 @@ class ScenarioHuntTests(unittest.TestCase):
             },
         )
         self.assertIn("20.12.2", report["remediation_script"])
-        self.assertNotIn("apt-get", section(report["remediation_script"], "api-node-01"))
+        node_section = section(report["remediation_script"], "api-node-01")
+        self.assertNotIn("apt-get", node_section)
+        self.assertIn("node -v", node_section)
+        self.assertIn("already at 20.12.2", node_section)
+        self.assertEqual(report["attack_patterns"], [])
+        self.assertFalse(report["honeypot"]["engaged"])
         self.assertNotIn("Request Smuggling", advisories[
             "Node.js Windows Command Injection (CVE-2024-27980)"
         ])
@@ -128,15 +163,15 @@ class DetectionTests(unittest.TestCase):
         json.dumps(report)
 
         self.assertTrue(report["threat_detected_in_logs"])
-        self.assertEqual(
-            report["affected_hosts"],
-            ["web-nginx-01", "app-php-01", "api-node-01"],
-        )
+        self.assertEqual(report["affected_hosts"], ["web-nginx-01"])
         cves = {item["cve_id"] for item in report["findings"]}
         self.assertIn("CVE-2026-21443", cves)
         self.assertIn("CVE-2024-4577", cves)
-        self.assertIn("CVE-2024-27980", cves)
+        self.assertNotIn("CVE-2024-27980", cves)
         self.assertIsNone(report["cve_id"])
+        self.assertIsNone(report["response_outcome"])
+        self.assertEqual(len(report["response_evidence"]), 3)
+        self.assertFalse(any("outcome=" in line for line in report["detected_log_evidence"]))
         self.assertFalse(any("index.html" in line for line in report["detected_log_evidence"]))
         self.assertNotIn("192.168.1.50", [item["actor"] for item in report["kill_chain"]])
 
@@ -191,7 +226,8 @@ class DetectionTests(unittest.TestCase):
         inventory, logs, _advisories = load_inputs()
         report = run_hunt("IoC IP: 198.51.100.42\n", inventory, logs)
         self.assertEqual(report["cve_id"], "CVE-2024-4577")
-        self.assertEqual(report["affected_hosts"], ["app-php-01"])
+        self.assertEqual(report["affected_hosts"], [])
+        self.assertTrue(report["threat_detected_in_logs"])
 
 
 class VersionLogicTests(unittest.TestCase):
@@ -332,10 +368,13 @@ class RemediationTests(unittest.TestCase):
         self.assertIn("ufw deny from 203.0.113.50", nginx)
         self.assertIn("nginx -v", nginx)
         self.assertNotIn("apt-get", php)
+        self.assertIn("8.2.20", php)
         self.assertIn("php -v", php)
         self.assertNotIn("apt-get", node)
+        self.assertIn("20.12.2", node)
         self.assertIn("node -v", node)
-        self.assertIn("/admin/config", node)
+        self.assertIn("/admin/config", script)
+        self.assertIn("/admin/session", script)
 
     def test_unknown_product_does_not_invent_an_apt_name(self):
         from agent import run_hunt
@@ -386,16 +425,29 @@ class ReportTests(unittest.TestCase):
         ]:
             self.assertIn(heading, markdown)
         self.assertIn("198.51.100.42", markdown)
-        self.assertIn("203.0.113.105", markdown)
         self.assertIn("203.0.113.50", markdown)
+        self.assertIn("203.0.113.77", markdown)
+        self.assertNotIn("203.0.113.105", markdown)
         self.assertIn("CVE-2024-4577", markdown)
-        self.assertIn("CVE-2024-27980", markdown)
         self.assertIn("OpenEMR", markdown)
         self.assertIn("T1059", markdown)
         self.assertIn("T1190", markdown)
         self.assertIn("/admin/config", markdown)
-        self.assertIn("8.2.18", markdown)
+        self.assertIn("/admin/session", markdown)
+        self.assertIn("8.2.20", markdown)
+        self.assertIn("attack_completed", markdown)
+        self.assertIn("patched_after_detection", markdown)
+        self.assertIn("patched_from_advisory", markdown)
         self.assertIn("not an attack pattern", markdown)
+        node_report = run_hunt(
+            load_inputs()[2]["Node.js Windows Command Injection (CVE-2024-27980)"],
+            inventory,
+            logs,
+        )
+        node_markdown = generate_report(node_report)
+        self.assertIn("CVE-2024-27980", node_markdown)
+        self.assertIn("20.12.2", node_markdown)
+        self.assertIn("patched_from_advisory", node_markdown)
         self.assertIn("simulation", markdown.lower())
         self.assertIn("- [ ]", markdown)
         self.assertNotIn("- [x]", markdown)
@@ -435,6 +487,46 @@ def _hunt_php(version: str) -> dict:
         "Vulnerable versions: < 8.2.20\nFixed version: 8.2.20\n"
     )
     return run_hunt(advisory, [_php(version)], "")
+
+
+class HuntReportViewTests(unittest.TestCase):
+    def view_for(self, label: str) -> tuple[dict, dict]:
+        from agent import run_hunt
+        from report_view import hunt_report
+
+        inventory, logs, advisories = load_inputs()
+        report = run_hunt(advisories[label], inventory, logs)
+        return report, hunt_report(report)
+
+    def test_nginx_report_repeats_the_completed_attack(self):
+        report, view = self.view_for("Nginx Zero-Day")
+
+        self.assertEqual(view["cve_id"], report["cve_id"])
+        self.assertEqual(view["affected_hosts"], report["affected_hosts"])
+        self.assertEqual(view["iocs"], report["iocs"])
+        self.assertEqual(view["evidence"], report["detected_log_evidence"])
+        self.assertEqual(view["action"], report["response_evidence"])
+        self.assertEqual(view["remediation_script"], report["remediation_script"])
+        self.assertEqual(view["mitre"]["technique_id"], "T1190")
+        self.assertIn("Ataque ejecutado por completo", view["verdict"])
+
+    def test_php_report_repeats_the_patch_after_the_attempt(self):
+        report, view = self.view_for("PHP CGI RCE (CVE-2024-4577)")
+
+        self.assertEqual(view["affected_hosts"], report["affected_hosts"])
+        self.assertEqual(view["evidence"], report["detected_log_evidence"])
+        self.assertEqual(view["action"], report["response_evidence"])
+        self.assertTrue(view["evidence"])
+        self.assertIn("identificó el intento", view["verdict"])
+
+    def test_node_report_repeats_the_patch_from_the_advisory(self):
+        report, view = self.view_for("Node.js Windows Command Injection (CVE-2024-27980)")
+
+        self.assertEqual(view["evidence"], report["detected_log_evidence"])
+        self.assertEqual(view["evidence"], [])
+        self.assertEqual(view["action"], report["response_evidence"])
+        self.assertIn("patched_from_advisory", view["action"][0])
+        self.assertIn("leyó el advisory", view["verdict"])
 
 
 if __name__ == "__main__":

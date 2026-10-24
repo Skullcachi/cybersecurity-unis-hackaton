@@ -56,11 +56,22 @@ class KillChainTests(unittest.TestCase):
         report = run_hunt("", inventory, logs)
         actors = {item["actor"]: item for item in report["kill_chain"]}
 
-        scanner = actors["203.0.113.50"]
+        completed = actors["203.0.113.50"]
+        self.assertTrue(completed["is_attack_pattern"])
+        self.assertEqual(completed["tactics"], ["TA0043", "TA0009"])
+        self.assertTrue(completed["follow_up"])
+        self.assertIn("203.0.113.50", report["honeypot"]["targets"])
+        for phase in completed["phases"]:
+            remediation = phase["remediation"]
+            self.assertTrue(remediation["preventive"])
+            self.assertTrue(remediation["detective"])
+            self.assertTrue(remediation["corrective"])
+
+        scanner = actors["203.0.113.77"]
         self.assertFalse(scanner["is_attack_pattern"])
         self.assertLessEqual(scanner["confidence"], 0.4)
         self.assertEqual(scanner["tactics"], ["TA0043"])
-        self.assertNotIn("203.0.113.50", report["honeypot"]["targets"])
+        self.assertNotIn("203.0.113.77", report["honeypot"]["targets"])
 
         chain = actors["198.51.100.42"]
         self.assertTrue(chain["is_attack_pattern"])
@@ -82,16 +93,40 @@ class KillChainTests(unittest.TestCase):
             self.assertTrue(remediation["mitigation_ids"])
             self.assertTrue(all(item.startswith("M") for item in remediation["mitigation_ids"]))
 
-        node = actors["203.0.113.105"]
+        self.assertNotIn("203.0.113.105", actors)
+
+    def test_node_command_injection_chain_uses_synthetic_logs(self):
+        from agent import run_hunt
+
+        inventory = [
+            {
+                "hostname": "api-node-01",
+                "os": "windows",
+                "software": "Node.js runtime",
+                "version": "20.11.1",
+                "status": "Active",
+            }
+        ]
+        logs = (
+            '2026-10-24 11:05:44 203.0.113.105 POST /api/v1/jobs '
+            'child_process.spawn task.bat "report&whoami" 500\n'
+            "2026-10-24 11:05:48 203.0.113.105 GET /admin/config 200\n"
+        )
+        report = run_hunt("", inventory, logs)
+        node = next(item for item in report["kill_chain"] if item["actor"] == "203.0.113.105")
         self.assertTrue(node["is_attack_pattern"])
         self.assertTrue(node["follow_up"])
         self.assertIn("TA0002", node["tactics"])
         self.assertIn("TA0009", node["tactics"])
-        self.assertLess(node["confidence"], chain["confidence"])
+        self.assertIn("203.0.113.105", report["honeypot"]["targets"])
         finding = next(item for item in report["findings"] if item["cve_id"] == "CVE-2024-27980")
         self.assertEqual(finding["severity"], "critical")
         self.assertTrue(finding["follow_up"])
         self.assertTrue(any("/admin/config" in line for line in finding["evidence"]))
+        self.assertEqual(report["affected_hosts"], ["api-node-01"])
+        for phase in node["phases"]:
+            self.assertTrue(phase["remediation"]["preventive"])
+            self.assertTrue(phase["remediation"]["corrective"])
 
 
 class HoneypotTests(unittest.TestCase):
@@ -133,8 +168,9 @@ class HoneypotTests(unittest.TestCase):
         self.assertIn("iptables", policy)
         self.assertIn("proxy_pass", policy)
         self.assertIn("198.51.100.42", policy)
-        self.assertIn("203.0.113.105", policy)
-        self.assertNotIn("203.0.113.50", policy)
+        self.assertIn("203.0.113.50", policy)
+        self.assertNotIn("203.0.113.77", policy)
+        self.assertNotIn("203.0.113.105", policy)
         self.assertIn("does not apply", policy)
 
         session = next(

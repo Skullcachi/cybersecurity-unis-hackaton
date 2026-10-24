@@ -40,7 +40,15 @@ LABELED_VALUE_RE = {
         r"^Fixed version:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE
     ),
 }
-FOLLOW_UP_SIGNATURES = {"php_cgi_injection", "node_spawn_injection", "shell_execution"}
+FOLLOW_UP_SIGNATURES = {
+    "php_cgi_injection",
+    "node_spawn_injection",
+    "shell_execution",
+    "nginx_scanner",
+}
+OUTCOME_RE = re.compile(
+    r"outcome=(attack_completed|patched_after_detection|patched_from_advisory)"
+)
 
 
 def run_hunt(advisory: str, inventory: list[dict[str, Any]], logs: str) -> dict[str, Any]:
@@ -57,7 +65,7 @@ def run_hunt(advisory: str, inventory: list[dict[str, Any]], logs: str) -> dict[
     cve_id = _resolved_cve(intel, findings)
     hosts = _affected_hostnames(intel, inventory, findings)
     cve_ids = _cve_ids(intel, findings)
-    script, corrections = build_plan(cve_ids, assessments, inventory, intel)
+    script, corrections = build_plan(cve_ids, assessments, inventory, intel, logs)
     honeypot = build_honeypot(assessments)
     if honeypot["engaged"]:
         corrections.append(
@@ -71,6 +79,7 @@ def run_hunt(advisory: str, inventory: list[dict[str, Any]], logs: str) -> dict[
             }
         )
     _attach_finding_remediation(findings, script)
+    outcome, response_evidence = _recorded_response(intel, inventory, logs)
     return {
         "cve_id": cve_id,
         "affected_software": _resolved_software(intel, cve_id),
@@ -80,6 +89,8 @@ def run_hunt(advisory: str, inventory: list[dict[str, Any]], logs: str) -> dict[
         "affected_hosts": hosts,
         "threat_detected_in_logs": bool(evidence),
         "detected_log_evidence": evidence,
+        "response_outcome": outcome,
+        "response_evidence": response_evidence,
         "mitre_attack": _resolved_mitre(intel, cve_id, findings),
         "remediation_script": script,
         "severity": _max_severity([item["severity"] for item in findings]),
@@ -124,6 +135,54 @@ def extract_iocs(advisory: str) -> list[str]:
     for match in IPV4_RE.finditer(advisory):
         add(match.group(0))
     return iocs
+
+
+def hosts_for_software(intel: dict[str, Any], inventory: list[dict[str, Any]]) -> list[str]:
+    software = intel.get("affected_software")
+    if not software:
+        return []
+    hosts: list[str] = []
+    for asset in inventory:
+        installed = asset.get("software")
+        hostname = asset.get("hostname")
+        if isinstance(installed, str) and hostname and software_matches(software, installed):
+            hosts.append(str(hostname))
+    return hosts
+
+
+def read_response(logs: str, hostnames: list[str]) -> tuple[str | None, list[str]]:
+    """Return the single recorded outcome for these hosts.
+
+    Audit lines are response evidence. They are not attack detections.
+    Several different outcomes leave ``response_outcome`` empty and keep
+    every matching line in the evidence list.
+    """
+    if not hostnames:
+        return None, []
+    seen: list[str] = []
+    evidence: list[str] = []
+    for line in logs.splitlines():
+        if not any(hostname in line for hostname in hostnames):
+            continue
+        match = OUTCOME_RE.search(line)
+        if match is None:
+            continue
+        evidence.append(line)
+        seen.append(match.group(1))
+    distinct = list(dict.fromkeys(seen))
+    outcome = distinct[0] if len(distinct) == 1 else None
+    return outcome, evidence
+
+
+def _recorded_response(
+    intel: dict[str, Any], inventory: list[dict[str, Any]], logs: str
+) -> tuple[str | None, list[str]]:
+    if intel.get("affected_software"):
+        return read_response(logs, hosts_for_software(intel, inventory))
+    if _advisory_empty(intel):
+        names = [str(asset["hostname"]) for asset in inventory if asset.get("hostname")]
+        return read_response(logs, names)
+    return None, []
 
 
 def map_mitre(intel: dict[str, Any]) -> dict[str, str | None]:
@@ -262,7 +321,7 @@ def hunt_logs(iocs: list[str], logs: str) -> list[str]:
     evidence: list[str] = []
     for line in logs.splitlines():
         stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
+        if not stripped or stripped.startswith("#") or "outcome=" in line:
             continue
         if any(ioc_in_line(ioc, line) for ioc in iocs):
             evidence.append(line)

@@ -1,7 +1,8 @@
 # Synthetic demo data for Sentinel Gnome. Not a capture from a real network.
-# 203.0.113.50 is a lone scanner and must stay a low-confidence alert.
-# 198.51.100.42 is a multi-stage PHP-CGI campaign.
-# 203.0.113.105 is a shorter Node.js command-injection chain.
+# Nginx: 203.0.113.50 finishes the attack (recon plus /admin/session) and stays unpatched.
+# 203.0.113.77 is a lone scanner and must stay a low-confidence alert.
+# PHP: 198.51.100.42 runs a multi-stage campaign, then the host is patched.
+# Node.js: patched from the advisory before any probe. No exploit lines for 203.0.113.105.
 # Benign clients use the 192.168.1.0/24 documentation range below.
 
 2026-10-24 09:15:00 192.168.1.10 GET /index.html 200 Mozilla/5.0
@@ -10,6 +11,10 @@
 2026-10-24 09:17:05 203.0.113.50 GET /robots.txt 404 ZD-Hunter/6.0
 2026-10-24 09:17:06 203.0.113.50 GET /.env 404 ZD-Hunter/6.0
 2026-10-24 09:17:07 203.0.113.50 GET /server-status 404 ZD-Hunter/6.0
+2026-10-24 09:18:20 203.0.113.50 POST /admin/session 200 ZD-Hunter/6.0
+2026-10-24 09:18:21 web-nginx-01 audit host=web-nginx-01 outcome=attack_completed source=203.0.113.50
+2026-10-24 09:19:10 203.0.113.77 GET /robots.txt 404 ZD-Hunter/6.0
+2026-10-24 09:19:12 203.0.113.77 GET /.env 404 ZD-Hunter/6.0
 2026-10-24 09:20:11 192.168.1.50 GET /about 200 Mozilla/5.0
 2026-10-24 10:11:05 192.168.1.75 GET /index.php 200 Mozilla/5.0
 2026-10-24 10:12:01 198.51.100.42 GET /php-cgi/php-cgi.exe 404 Mozilla/5.0
@@ -20,6 +25,6 @@
 2026-10-24 10:14:21 198.51.100.42 POST /php-cgi/php-cgi.exe cmd.exe /c whoami 200
 2026-10-24 10:15:02 198.51.100.42 GET /admin/config 200
 2026-10-24 10:16:10 198.51.100.42 POST http://tools.attacker-lab.example/collect 200
+2026-10-24 10:16:40 sentinel-gnome host=app-php-01 action=upgrade version=8.2.20 outcome=patched_after_detection
+2026-10-24 10:40:00 sentinel-gnome host=api-node-01 action=upgrade version=20.12.2 outcome=patched_from_advisory source=advisory
 2026-10-24 11:02:10 192.168.1.80 GET /api/v1/health 200 Mozilla/5.0
-2026-10-24 11:05:44 203.0.113.105 POST /api/v1/jobs child_process.spawn task.bat "report&whoami" 500
-2026-10-24 11:05:48 203.0.113.105 GET /admin/config 200

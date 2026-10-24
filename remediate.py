@@ -10,6 +10,7 @@ from catalog import (
     CVE_RULES,
     MITIGATION_NAMES,
     TACTIC_NAMES,
+    compare_versions,
     parse_constraint,
     version_matches,
     version_tuple,
@@ -73,16 +74,16 @@ PHASE_CONTROLS: dict[str, dict[str, Any]] = {
     },
     "TA0009": {
         "preventive": [
-            "Require authentication and an allowlist for /admin/config.",
+            "Require authentication and an allowlist for /admin/config and /admin/session.",
         ],
         "detective": [
-            "Alert when an external address receives HTTP 200 from /admin/config.",
+            "Alert when an external address receives HTTP 200 from /admin/config or /admin/session.",
         ],
         "corrective": [
             "Restrict the admin route and rotate any canary that was read.",
         ],
         "mitigation_ids": ["M1035", "M1030", "M1022"],
-        "waf": 'location /admin/config { allow 192.168.1.0/24; deny all; }',
+        "waf": "location /admin/ { allow 192.168.1.0/24; deny all; }",
     },
     "TA0010": {
         "preventive": [
@@ -151,6 +152,34 @@ def apt_package(software: str, version: str) -> str | None:
     if "node" in name:
         return "nodejs"
     return None
+
+
+def patched_hosts(cve_id: str, inventory: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Hosts on the CVE platform whose installed build already meets the fix."""
+    rule = CVE_RULES.get(cve_id)
+    if rule is None:
+        return []
+    hosts: list[dict[str, Any]] = []
+    for asset in inventory:
+        if not is_active(asset):
+            continue
+        installed = asset.get("software")
+        hostname = str(asset.get("hostname") or "")
+        version = str(asset.get("version") or "")
+        if not isinstance(installed, str) or not hostname:
+            continue
+        if not software_matches(rule.software, installed):
+            continue
+        fixed = rule.fixed_version(version)
+        if not fixed or rule.is_vulnerable(version):
+            continue
+        if compare_versions(version_tuple(version), version_tuple(fixed)) < 0:
+            continue
+        os_name = host_os(asset, rule.platform)
+        if rule.platform != "any" and os_name != rule.platform:
+            continue
+        hosts.append(_record(asset, os_name, False))
+    return hosts
 
 
 def classify_cve(
@@ -224,23 +253,33 @@ def build_plan(
     actors: list[dict[str, Any]],
     inventory: list[dict[str, Any]],
     intel: dict[str, Any],
+    logs: str = "",
 ) -> tuple[str, list[dict[str, str]]]:
     actions: list[Action] = []
     blocked: set[str] = set()
+    covered: set[str] = set()
     for cve_id in cve_ids:
         if cve_id not in CVE_RULES:
             continue
         vulnerable, excluded = classify_cve(cve_id, inventory)
+        patched = patched_hosts(cve_id, inventory)
         ips = _ips_for_cve(cve_id, actors, intel)
         follow_up = _cve_follow_up(cve_id, actors)
         for asset in vulnerable:
-            actions.extend(_host_actions(asset, cve_id, ips, follow_up, blocked, True))
+            actions.extend(_host_actions(asset, cve_id, ips, follow_up, blocked, "vulnerable"))
+            covered.add(str(asset["hostname"]))
         for asset in excluded:
-            actions.extend(_host_actions(asset, cve_id, ips, follow_up, blocked, False))
+            actions.extend(_host_actions(asset, cve_id, ips, follow_up, blocked, "excluded"))
+            covered.add(str(asset["hostname"]))
+        for asset in patched:
+            actions.extend(_host_actions(asset, cve_id, ips, follow_up, blocked, "patched"))
+            covered.add(str(asset["hostname"]))
     if intel.get("cve_id") and intel["cve_id"] not in CVE_RULES:
         ips = [ioc for ioc in intel.get("iocs") or [] if _is_ip(ioc)]
         for asset in constraint_hosts(intel, inventory):
             actions.extend(_generic_actions(asset, intel, ips, blocked))
+            covered.add(str(asset["hostname"]))
+    actions.extend(_recorded_response_actions(logs, inventory, covered))
     actions.extend(_phase_actions(actors))
     actions = _dedup(actions)
     return render_plan(actions), [_correction(action) for action in actions if action.summary]
@@ -283,22 +322,31 @@ def _host_actions(
     ips: list[str],
     follow_up: bool,
     blocked: set[str],
-    applicable: bool,
+    state: str,
 ) -> list[Action]:
     hostname = str(asset["hostname"])
     os_name = str(asset["os"])
     rule = CVE_RULES[cve_id]
-    fixed = rule.fixed_version(str(asset["version"])) or "vendor-fixed"
-    summary = (
-        f"Upgrade {rule.software} on {hostname} ({os_name}) to {fixed}"
-        if applicable
-        else f"Record that {cve_id} does not apply to {hostname} ({os_name})"
-    )
+    version = str(asset["version"])
+    fixed = rule.fixed_version(version) or "vendor-fixed"
+    applicable = state == "vulnerable"
+    if state == "patched":
+        summary = f"Confirm {hostname} is already at {fixed}"
+        lines = [
+            f"# {hostname} is already at {version}, which meets {fixed} for {cve_id}.",
+            "# No upgrade command is proposed.",
+        ]
+    elif applicable:
+        summary = f"Upgrade {rule.software} on {hostname} ({os_name}) to {fixed}"
+        lines = _upgrade_lines(asset, cve_id, True)
+    else:
+        summary = f"Record that {cve_id} does not apply to {hostname} ({os_name})"
+        lines = _upgrade_lines(asset, cve_id, False)
     actions = [
         Action(
             id=_slug("upgrade", hostname, cve_id, fixed),
             summary=summary,
-            lines=_upgrade_lines(asset, cve_id, applicable),
+            lines=lines,
             host=hostname,
             os_name=os_name,
             cve_id=cve_id,
@@ -384,6 +432,51 @@ def _generic_actions(
             continue
         blocked.add(ip)
         actions.append(_block_action(hostname, os_name, cve_id, ip))
+    return actions
+
+
+def _recorded_response_actions(
+    logs: str, inventory: list[dict[str, Any]], covered: set[str]
+) -> list[Action]:
+    """Note a patch that the logs already recorded when no CVE section covers the host."""
+    actions: list[Action] = []
+    outcome_re = re.compile(
+        r"outcome=(attack_completed|patched_after_detection|patched_from_advisory)"
+    )
+    for line in (logs or "").splitlines():
+        match = outcome_re.search(line)
+        host_match = re.search(r"host=(\S+)", line)
+        if match is None or host_match is None:
+            continue
+        hostname = host_match.group(1)
+        if hostname in covered:
+            continue
+        asset = next(
+            (item for item in inventory if str(item.get("hostname") or "") == hostname),
+            None,
+        )
+        if asset is None:
+            continue
+        version_match = re.search(r"version=(\S+)", line)
+        version = version_match.group(1) if version_match else str(asset.get("version") or "")
+        software = str(asset.get("software") or "")
+        outcome = match.group(1)
+        os_name = host_os(asset, "linux")
+        actions.append(
+            Action(
+                id=_slug("recorded", hostname, outcome),
+                summary=f"Confirm {hostname} recorded response {outcome}",
+                lines=[
+                    f"# {hostname} recorded {outcome} at version {version}.",
+                    "# Inventory already reports this build. No install command is proposed.",
+                    _verify_command(software),
+                ],
+                host=hostname,
+                os_name=os_name,
+                cve_id=outcome,
+            )
+        )
+        covered.add(hostname)
     return actions
 
 

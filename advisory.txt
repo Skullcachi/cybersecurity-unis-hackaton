@@ -10,5 +10,4 @@ IoC User-Agent: ZD-Hunter/6.0
 Summary
 Demo identifier only. The authoritative CVE-2026-21443 record is OpenEMR XSS, not nginx.
 In this lab, nginx at or below 1.24.0 is the fictional affected range. Upgrade target: 1.26.2.
-The bundled logs show only reconnaissance from 203.0.113.50 using User-Agent ZD-Hunter/6.0.
-That lone scanner is an alert, not a multi-stage attack pattern.
+203.0.113.50 scans with ZD-Hunter/6.0 and then POSTs /admin/session 200. The audit line records outcome=attack_completed. web-nginx-01 stays on 1.24.0.

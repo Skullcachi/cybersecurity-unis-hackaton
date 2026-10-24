@@ -12,7 +12,7 @@
     "ip": "192.168.1.75",
     "os": "windows",
     "software": "PHP CGI / Apache",
-    "version": "8.2.18",
+    "version": "8.2.20",
     "status": "Active"
   },
   {
@@ -20,7 +20,7 @@
     "ip": "192.168.1.80",
     "os": "windows",
     "software": "Node.js runtime",
-    "version": "20.11.1",
+    "version": "20.12.2",
     "status": "Active"
   }
 ]

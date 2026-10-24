@@ -129,7 +129,7 @@ def _observation(text: str) -> dict[str, Any] | None:
             None,
             "collection",
             "high",
-            "/admin/config",
+            "/admin",
         )
     if _is_header_abuse(text):
         observed = _event(
@@ -233,9 +233,10 @@ def _is_resource_development(text: str) -> bool:
 
 
 def _is_admin_collection(text: str) -> bool:
-    if "/admin/config" not in text.lower():
+    """Successful read or write of an /admin route, before generic scanner rules."""
+    if _status(text) != "200":
         return False
-    return _status(text) == "200"
+    return re.search(r"/admin(?:/|\b)", text, re.IGNORECASE) is not None
 
 
 def _is_header_abuse(text: str) -> bool:

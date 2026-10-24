@@ -93,6 +93,14 @@ def _executive_summary(hunt: dict[str, Any]) -> str:
         "Isolated single-tactic activity, including a lone scanner, stays an alert.",
         "Sentinel Gnome did not execute remediation commands or attacker payloads.",
     ]
+    outcome = hunt.get("response_outcome")
+    recorded = [str(line).strip() for line in hunt.get("response_evidence") or [] if str(line).strip()]
+    if outcome:
+        lines.append(f"Recorded response: {outcome}.")
+    elif recorded:
+        lines.append("Recorded responses differ by host, so no single outcome is selected.")
+    for line in recorded:
+        lines.append(f"Response evidence: {line}")
     if _mentions_demo(hunt):
         lines.append(
             "CVE-2026-21443 is a demo identifier in this lab. The authoritative "
