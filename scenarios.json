@@ -1,0 +1,14 @@
+[
+  {
+    "label": "Nginx Zero-Day",
+    "advisory": "Emergency advisory\nCVE: CVE-2026-21443\nSoftware: nginx\nVulnerable versions: <= 1.24.0\nSeverity: critical\nFixed version: 1.26.2\nIoC IP: 203.0.113.50\nIoC User-Agent: ZD-Hunter/6.0\n\nSummary\nNginx releases at or below 1.24.0 are affected. Upgrade to 1.26.2.\nScanning was observed from 203.0.113.50 using User-Agent ZD-Hunter/6.0.\n"
+  },
+  {
+    "label": "PHP CGI RCE (CVE-2024-4577)",
+    "advisory": "Emergency advisory\nCVE: CVE-2024-4577\nSoftware: PHP\nVulnerable versions: < 8.2.20\nSeverity: critical\nFixed version: 8.2.20\nIoC IP: 198.51.100.42\nIoC Path: /php-cgi/php-cgi.exe\n\nSummary\nPHP 8.2 before 8.2.20 is affected when PHP-CGI is exposed. Upgrade to 8.2.20.\nRequests were observed from 198.51.100.42 toward /php-cgi/php-cgi.exe.\n"
+  },
+  {
+    "label": "Node.js Request Smuggling (CVE-2024-27980)",
+    "advisory": "Emergency advisory\nCVE: CVE-2024-27980\nSoftware: Node.js\nVulnerable versions: < 20.12.2\nSeverity: high\nFixed version: 20.12.2\nIoC IP: 203.0.113.105\n\nSummary\nNode.js 20 before 20.12.2 is affected on Windows. Upgrade to 20.12.2.\nSuspicious requests were observed from 203.0.113.105.\n"
+  }
+]

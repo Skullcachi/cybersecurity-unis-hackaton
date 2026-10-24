@@ -1,0 +1,23 @@
+[
+  {
+    "hostname": "web-nginx-01",
+    "ip": "192.168.1.10",
+    "software": "Nginx HTTP Server",
+    "version": "1.24.0",
+    "status": "Active"
+  },
+  {
+    "hostname": "app-php-01",
+    "ip": "192.168.1.75",
+    "software": "PHP CGI / Apache",
+    "version": "8.2.18",
+    "status": "Active"
+  },
+  {
+    "hostname": "api-node-01",
+    "ip": "192.168.1.80",
+    "software": "Node.js runtime",
+    "version": "20.11.1",
+    "status": "Active"
+  }
+]

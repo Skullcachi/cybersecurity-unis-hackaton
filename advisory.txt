@@ -1,0 +1,12 @@
+Emergency advisory
+CVE: CVE-2026-21443
+Software: nginx
+Vulnerable versions: <= 1.24.0
+Severity: critical
+Fixed version: 1.26.2
+IoC IP: 203.0.113.50
+IoC User-Agent: ZD-Hunter/6.0
+
+Summary
+Nginx releases at or below 1.24.0 are affected. Upgrade to 1.26.2.
+Scanning was observed from 203.0.113.50 using User-Agent ZD-Hunter/6.0.

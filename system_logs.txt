@@ -1,0 +1,11 @@
+# Logs Nginx
+2026-10-24 09:15:00 192.168.1.10 GET /index.html 200 Mozilla/5.0
+2026-10-24 09:16:41 203.0.113.50 GET /status 200 ZD-Hunter/6.0
+2026-10-24 09:17:02 203.0.113.50 GET / 200 ZD-Hunter/6.0
+# Logs PHP
+2026-10-24 10:11:05 192.168.1.75 GET /index.php 200 Mozilla/5.0
+2026-10-24 10:14:12 198.51.100.42 POST /php-cgi/php-cgi.exe?%2d%64+%61%6c%6c%6f%77%5f%75%72%6c%5f%69%6e%63%6c%75%64%65%3d%31 200
+# Logs Node.js
+2026-10-24 11:02:10 192.168.1.80 GET /api/v1/health 200 Mozilla/5.0
+2026-10-24 11:05:45 203.0.113.105 GET /api/v1/public "Transfer-Encoding: \x00chunked" 400
+2026-10-24 11:05:48 203.0.113.105 GET /admin/config "Host: internal-service" 200

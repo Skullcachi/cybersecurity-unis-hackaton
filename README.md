@@ -1,16 +1,24 @@
-# Cybersecurity UNIS Hackathon
+# Sentinel Gnome
 
-Empty repository for the UNIS cybersecurity hackathon. This first commit adds a README, a gitignore, and the Gentleman Guardian Angel review config so later work starts from a clean baseline.
+Local SOC demo. Pick a scenario, compare it with the asset inventory, hunt IoCs in the logs, show the MITRE ATT&CK mapping, and simulate a defensive bash script. The dashboard never executes that script.
 
-## What is here
+## Quick path
 
-| Path | Purpose |
-|------|---------|
-| `README.md` | What this repository is |
-| `.gitignore` | Local, secret, and build files that stay out of git |
-| `.gga` | Pre-commit review config. Provider is Cursor. |
-| `AGENTS.md` | Rules the pre-commit review reads |
+1. `python3 -m venv .venv && source .venv/bin/activate`
+2. `pip install -r requirements.txt`
+3. `streamlit run app.py`
+
+The scenario menu is **Nginx Zero-Day**, **PHP CGI RCE (CVE-2024-4577)**, **Node.js Request Smuggling (CVE-2024-27980)**, and **Opción Personalizada**.
+
+## Details
+
+| Topic | Decision |
+|-------|----------|
+| Engine | `agent.run_hunt` returns one strict JSON object. No network and no model call. |
+| Inputs | `scenarios.json`, `inventory.json`, `system_logs.txt` |
+| UI | Metrics, red or green exposure, MITRE cards, log evidence, and a simulation button. |
+| Check | `python3 -m unittest tests.test_agent -v` |
 
 ## Next step
 
-Add the application once the stack is chosen.
+Choose **Opción Personalizada** and paste another advisory.
