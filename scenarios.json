@@ -1,14 +1,14 @@
 [
   {
     "label": "Nginx Zero-Day",
-    "advisory": "Emergency advisory\nCVE: CVE-2026-21443\nSoftware: nginx\nVulnerable versions: <= 1.24.0\nSeverity: critical\nFixed version: 1.26.2\nIoC IP: 203.0.113.50\nIoC User-Agent: ZD-Hunter/6.0\n\nSummary\nNginx releases at or below 1.24.0 are affected. Upgrade to 1.26.2.\nScanning was observed from 203.0.113.50 using User-Agent ZD-Hunter/6.0.\n"
+    "advisory": "Emergency advisory\nCVE: CVE-2026-21443\nSoftware: nginx\nVulnerable versions: <= 1.24.0\nSeverity: critical\nFixed version: 1.26.2\nIoC IP: 203.0.113.50\nIoC User-Agent: ZD-Hunter/6.0\n\nSummary\nDemo identifier only. The authoritative CVE-2026-21443 record is OpenEMR XSS, not nginx.\nIn this lab, nginx at or below 1.24.0 is the fictional affected range. Upgrade target: 1.26.2.\n203.0.113.50 scans with ZD-Hunter/6.0 and then POSTs /admin/session 200. The audit line records outcome=attack_completed. web-nginx-01 stays on 1.24.0.\n203.0.113.77 is a separate lone scanner and is not this scenario's attacker.\n"
   },
   {
     "label": "PHP CGI RCE (CVE-2024-4577)",
-    "advisory": "Emergency advisory\nCVE: CVE-2024-4577\nSoftware: PHP\nVulnerable versions: < 8.2.20\nSeverity: critical\nFixed version: 8.2.20\nIoC IP: 198.51.100.42\nIoC Path: /php-cgi/php-cgi.exe\n\nSummary\nPHP 8.2 before 8.2.20 is affected when PHP-CGI is exposed. Upgrade to 8.2.20.\nRequests were observed from 198.51.100.42 toward /php-cgi/php-cgi.exe.\n"
+    "advisory": "Emergency advisory\nCVE: CVE-2024-4577\nSoftware: PHP\nVulnerable versions: 8.1.x < 8.1.29; 8.2.x < 8.2.20; 8.3.x < 8.3.8\nSeverity: critical\nFixed version: 8.2.20\nIoC IP: 198.51.100.42\nIoC Path: /php-cgi/php-cgi.exe\n\nSummary\nPHP-CGI on Windows is affected on 8.1 before 8.1.29, 8.2 before 8.2.20, and 8.3 before 8.3.8.\nThe fix points are 8.1.29, 8.2.20, and 8.3.8. Linux builds are not affected.\nThe synthetic campaign from 198.51.100.42 probes php-cgi.exe, stages a tool on tools.attacker-lab.example, injects a soft-hyphen argument, runs cmd.exe, reads /admin/config, and posts to the attacker domain.\nSentinel Gnome then records outcome=patched_after_detection. app-php-01 is already at 8.2.20 and is no longer in the vulnerable range.\n"
   },
   {
-    "label": "Node.js Request Smuggling (CVE-2024-27980)",
-    "advisory": "Emergency advisory\nCVE: CVE-2024-27980\nSoftware: Node.js\nVulnerable versions: < 20.12.2\nSeverity: high\nFixed version: 20.12.2\nIoC IP: 203.0.113.105\n\nSummary\nNode.js 20 before 20.12.2 is affected on Windows. Upgrade to 20.12.2.\nPatch from this advisory. Do not wait for a probe from 203.0.113.105.\n"
+    "label": "Node.js Windows Command Injection (CVE-2024-27980)",
+    "advisory": "Emergency advisory\nCVE: CVE-2024-27980\nSoftware: Node.js\nVulnerable versions: 18.x < 18.20.2; 20.x < 20.12.2; 21.x < 21.7.3\nSeverity: high\nFixed version: 20.12.2\nIoC IP: 203.0.113.105\n\nSummary\nCVE-2024-27980 is a Windows command injection in child_process.spawn and spawnSync when a .bat or .cmd file is spawned without shell:true. It is not HTTP request smuggling.\nFixed in 18.20.2, 20.12.2, and 21.7.3. CVE-2024-36138 bypassed the first fix; prefer 20.15.1 or later on the 20.x line.\nPatch from this advisory. Do not wait for a probe from 203.0.113.105.\napi-node-01 is already at 20.12.2. The logs record outcome=patched_from_advisory and contain no exploit line.\n"
   }
 ]

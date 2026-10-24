@@ -1,7 +1,7 @@
 """Deterministic hunt agent for Sentinel Gnome.
 
-``run_hunt`` returns a strict JSON object. ``RESPONSE_FORMAT`` documents that
-contract for callers that expect ``response_format={"type": "json_object"}``.
+``run_hunt`` keeps the original keys and adds severity, findings, kill-chain
+correlation, and a simulated honeypot decision. Nothing in this module is executed.
 """
 
 from __future__ import annotations
@@ -9,11 +9,23 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from catalog import CVE_RULES, EMPTY_MITRE, PUBLIC_EXPLOIT, SCANNING, SEVERITY_RANK
+from detect import parse_logs
+from honeypot import build_honeypot
+from killchain import correlate_events
+from remediate import (
+    build_plan,
+    classify_cve,
+    constraint_hosts,
+    controls_for_phase,
+    software_matches,
+)
+from report import SIGNOFF_ITEMS, generate_report, generate_report_html
+
 RESPONSE_FORMAT = {"type": "json_object"}
 
 CVE_RE = re.compile(r"CVE-\d{4}-\d{4,}", re.IGNORECASE)
 IPV4_RE = re.compile(r"(?<!\d)(?:\d{1,3}\.){3}\d{1,3}(?!\d)")
-CONSTRAINT_RE = re.compile(r"(<=|>=|<|>|==)\s*(\d+(?:\.\d+)*)")
 IOC_LINE_RE = re.compile(
     r"^IoC\s+(IP|User-Agent|Domain|SHA256|Path|Header):\s*(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE,
@@ -28,43 +40,11 @@ LABELED_VALUE_RE = {
         r"^Fixed version:\s*(\S+)\s*$", re.IGNORECASE | re.MULTILINE
     ),
 }
-MITRE_BY_CVE = {
-    "CVE-2026-21443": {
-        "tactic": "Initial Access",
-        "technique_id": "T1190",
-        "technique_name": "Exploit Public-Facing Application",
-        "mitre_mitigation_id": "M1051",
-    },
-    "CVE-2024-4577": {
-        "tactic": "Initial Access",
-        "technique_id": "T1190",
-        "technique_name": "Exploit Public-Facing Application",
-        "mitre_mitigation_id": "M1051",
-    },
-    "CVE-2024-27980": {
-        "tactic": "Execution",
-        "technique_id": "T1059",
-        "technique_name": "Command and Scripting Interpreter",
-        "mitre_mitigation_id": "M1051",
-    },
-}
-PUBLIC_EXPLOIT = {
-    "tactic": "Initial Access",
-    "technique_id": "T1190",
-    "technique_name": "Exploit Public-Facing Application",
-    "mitre_mitigation_id": "M1051",
-}
-SCANNING = {
-    "tactic": "Reconnaissance",
-    "technique_id": "T1595",
-    "technique_name": "Active Scanning",
-    "mitre_mitigation_id": "M1056",
-}
-EMPTY_MITRE = {
-    "tactic": None,
-    "technique_id": None,
-    "technique_name": None,
-    "mitre_mitigation_id": None,
+FOLLOW_UP_SIGNATURES = {
+    "php_cgi_injection",
+    "node_spawn_injection",
+    "shell_execution",
+    "nginx_scanner",
 }
 OUTCOME_RE = re.compile(
     r"outcome=(attack_completed|patched_after_detection|patched_from_advisory)"
@@ -72,28 +52,56 @@ OUTCOME_RE = re.compile(
 
 
 def run_hunt(advisory: str, inventory: list[dict[str, Any]], logs: str) -> dict[str, Any]:
-    """Run the Sentinel Gnome cycle and return the strict demo JSON object."""
+    """Run the local hunt. Remediation text and honeypot policy are not applied."""
     advisory = advisory or ""
     inventory = list(inventory or [])
     logs = logs or ""
 
     intel = extract_threat_intel(advisory)
-    affected_hosts = assess_hosts(intel, inventory)
-    evidence = hunt_logs(intel["iocs"], logs)
-    outcome, response_evidence = read_response(logs, hosts_for_software(intel, inventory))
+    events = [event for event in parse_logs(logs) if _event_in_scope(event, intel)]
+    findings = _apply_follow_up(_build_findings(events, inventory), events)
+    assessments = _with_controls(correlate_events(events), inventory)
+    evidence = _evidence(logs, events, intel)
+    cve_id = _resolved_cve(intel, findings)
+    hosts = _affected_hostnames(intel, inventory, findings)
+    cve_ids = _cve_ids(intel, findings)
+    script, corrections = build_plan(cve_ids, assessments, inventory, intel, logs)
+    honeypot = build_honeypot(assessments)
+    if honeypot["engaged"]:
+        corrections.append(
+            {
+                "id": "review-honeypot-policy",
+                "summary": (
+                    "Review the simulated honeypot redirect policy. "
+                    "Do not apply it until the decoy is isolated."
+                ),
+                "status": "pending",
+            }
+        )
+    _attach_finding_remediation(findings, script)
+    outcome, response_evidence = _recorded_response(intel, inventory, logs)
     return {
-        "cve_id": intel["cve_id"],
-        "affected_software": intel["affected_software"],
-        "vulnerable_versions": intel["vulnerable_versions"],
-        "iocs": intel["iocs"],
-        "is_system_vulnerable": bool(affected_hosts),
-        "affected_hosts": affected_hosts,
+        "cve_id": cve_id,
+        "affected_software": _resolved_software(intel, cve_id),
+        "vulnerable_versions": _resolved_versions(intel, cve_id),
+        "iocs": _resolved_iocs(intel, events),
+        "is_system_vulnerable": bool(hosts),
+        "affected_hosts": hosts,
         "threat_detected_in_logs": bool(evidence),
         "detected_log_evidence": evidence,
         "response_outcome": outcome,
         "response_evidence": response_evidence,
-        "mitre_attack": map_mitre(intel),
-        "remediation_script": build_remediation(intel),
+        "mitre_attack": _resolved_mitre(intel, cve_id, findings),
+        "remediation_script": script,
+        "severity": _max_severity([item["severity"] for item in findings]),
+        "findings": findings,
+        "corrections": corrections,
+        "signoff": [dict(item, status="pending") for item in SIGNOFF_ITEMS],
+        "cve_note": CVE_RULES[cve_id].note if cve_id in CVE_RULES else None,
+        "alerts": [item for item in assessments if not item["is_attack_pattern"]],
+        "attack_patterns": [item for item in assessments if item["is_attack_pattern"]],
+        "kill_chain": assessments,
+        "honeypot": honeypot,
     }
 
 
@@ -129,29 +137,6 @@ def extract_iocs(advisory: str) -> list[str]:
     return iocs
 
 
-def assess_hosts(intel: dict[str, Any], inventory: list[dict[str, Any]]) -> list[str]:
-    software = intel.get("affected_software")
-    constraint = parse_constraint(intel.get("vulnerable_versions"))
-    if not software or constraint is None:
-        return []
-
-    operator, bound = constraint
-    hosts: list[str] = []
-    for asset in inventory:
-        if str(asset.get("status") or "Active").casefold() != "active":
-            continue
-        installed = asset.get("software")
-        version = str(asset.get("version") or "")
-        hostname = asset.get("hostname")
-        if not isinstance(installed, str) or not hostname:
-            continue
-        if not software_matches(software, installed):
-            continue
-        if version_matches(version, operator, bound):
-            hosts.append(str(hostname))
-    return hosts
-
-
 def hosts_for_software(intel: dict[str, Any], inventory: list[dict[str, Any]]) -> list[str]:
     software = intel.get("affected_software")
     if not software:
@@ -165,19 +150,16 @@ def hosts_for_software(intel: dict[str, Any], inventory: list[dict[str, Any]]) -
     return hosts
 
 
-def hunt_logs(iocs: list[str], logs: str) -> list[str]:
-    evidence: list[str] = []
-    for line in logs.splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "outcome=" in line:
-            continue
-        if any(ioc_in_line(ioc, line) for ioc in iocs):
-            evidence.append(line)
-    return evidence
-
-
 def read_response(logs: str, hostnames: list[str]) -> tuple[str | None, list[str]]:
-    outcome = None
+    """Return the single recorded outcome for these hosts.
+
+    Audit lines are response evidence. They are not attack detections.
+    Several different outcomes leave ``response_outcome`` empty and keep
+    every matching line in the evidence list.
+    """
+    if not hostnames:
+        return None, []
+    seen: list[str] = []
     evidence: list[str] = []
     for line in logs.splitlines():
         if not any(hostname in line for hostname in hostnames):
@@ -186,41 +168,32 @@ def read_response(logs: str, hostnames: list[str]) -> tuple[str | None, list[str
         if match is None:
             continue
         evidence.append(line)
-        outcome = match.group(1)
+        seen.append(match.group(1))
+    distinct = list(dict.fromkeys(seen))
+    outcome = distinct[0] if len(distinct) == 1 else None
     return outcome, evidence
+
+
+def _recorded_response(
+    intel: dict[str, Any], inventory: list[dict[str, Any]], logs: str
+) -> tuple[str | None, list[str]]:
+    if intel.get("affected_software"):
+        return read_response(logs, hosts_for_software(intel, inventory))
+    if _advisory_empty(intel):
+        names = [str(asset["hostname"]) for asset in inventory if asset.get("hostname")]
+        return read_response(logs, names)
+    return None, []
 
 
 def map_mitre(intel: dict[str, Any]) -> dict[str, str | None]:
     cve_id = intel.get("cve_id")
-    if cve_id in MITRE_BY_CVE:
-        return dict(MITRE_BY_CVE[cve_id])
+    if cve_id in CVE_RULES:
+        return dict(CVE_RULES[cve_id].mitre)
     if cve_id:
         return dict(PUBLIC_EXPLOIT)
     if intel.get("iocs"):
         return dict(SCANNING)
     return dict(EMPTY_MITRE)
-
-
-def build_remediation(intel: dict[str, Any]) -> str:
-    cve_id = intel.get("cve_id") or "UNKNOWN-CVE"
-    software = intel.get("affected_software")
-    fixed_version = intel.get("fixed_version")
-    lines = [
-        "#!/bin/bash",
-        f"# Defensive mitigation for {cve_id}. Review before running.",
-        "# Sentinel Gnome does not execute this script.",
-        "set -euo pipefail",
-    ]
-    if software and fixed_version:
-        lines.append(f'echo "Upgrade {software} to {fixed_version}"')
-        lines.append(f'apt-get install -y "{software}={fixed_version}*"')
-    else:
-        lines.append('echo "Fixed version was not identified; no upgrade command generated."')
-    for ioc in intel.get("iocs") or []:
-        if IPV4_RE.fullmatch(ioc):
-            lines.append(f'echo "Block IoC {ioc}"')
-            lines.append(f"ufw deny from {ioc} to any")
-    return "\n".join(lines) + "\n"
 
 
 def simulate_script(script: str) -> str:
@@ -234,53 +207,274 @@ def simulate_script(script: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-def parse_constraint(text: str | None) -> tuple[str, tuple[int, ...]] | None:
-    if not text:
-        return None
-    match = CONSTRAINT_RE.search(text)
-    if match is None:
-        return None
-    return match.group(1), version_tuple(match.group(2))
+def _build_findings(
+    events: list[dict[str, Any]], inventory: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for event in events:
+        key = str(event["signature_id"])
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(event)
+    findings: list[dict[str, Any]] = []
+    for key in order:
+        bucket = grouped[key]
+        first = bucket[0]
+        cve_id = first.get("cve_id")
+        rule = CVE_RULES.get(cve_id) if cve_id else None
+        vulnerable, excluded = classify_cve(cve_id, inventory) if rule else ([], [])
+        findings.append(
+            {
+                "id": key,
+                "title": first["title"],
+                "cve_id": cve_id,
+                "cve_note": rule.note if rule else first.get("cve_note"),
+                "demo": bool(rule and rule.demo),
+                "severity": _initial_severity(first, bucket),
+                "base_severity": first.get("base_severity"),
+                "follow_up": False,
+                "attacker_ips": _unique(str(item["ip"]) for item in bucket),
+                "timestamps": [str(item["timestamp"]) for item in bucket],
+                "evidence": [str(item["text"]) for item in bucket],
+                "software": first.get("software"),
+                "affected_hosts": vulnerable,
+                "platform_excluded": excluded,
+                "mitre_attack": dict(rule.mitre) if rule else _technique_mitre(first),
+                "tactic_id": first.get("tactic_id"),
+                "remediation": "",
+            }
+        )
+    return findings
 
 
-def version_tuple(version: str) -> tuple[int, ...]:
-    parts = re.findall(r"\d+", version)
-    return tuple(int(part) for part in parts) or (0,)
+def _apply_follow_up(
+    findings: list[dict[str, Any]], events: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    admin = [event for event in events if event.get("signature_id") == "admin_collection"]
+    for finding in findings:
+        if finding["id"] not in FOLLOW_UP_SIGNATURES:
+            continue
+        ips = set(finding["attacker_ips"])
+        for event in admin:
+            if event["ip"] not in ips:
+                continue
+            if event["text"] not in finding["evidence"]:
+                finding["evidence"].append(event["text"])
+            finding["follow_up"] = True
+            finding["severity"] = "critical"
+    return findings
 
 
-def version_matches(version: str, operator: str, bound: tuple[int, ...]) -> bool:
-    compared = compare_versions(version_tuple(version), bound)
-    if operator == "<=":
-        return compared <= 0
-    if operator == "<":
-        return compared < 0
-    if operator == ">=":
-        return compared >= 0
-    if operator == ">":
-        return compared > 0
-    return compared == 0
+def _with_controls(
+    assessments: list[dict[str, Any]], inventory: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for assessment in assessments:
+        phases = []
+        for phase in assessment["phases"]:
+            updated = dict(phase)
+            updated["remediation"] = controls_for_phase(
+                phase, inventory, str(assessment.get("ip") or "")
+            )
+            phases.append(updated)
+        annotated.append({**assessment, "phases": phases})
+    return annotated
 
 
-def compare_versions(left: tuple[int, ...], right: tuple[int, ...]) -> int:
-    width = max(len(left), len(right))
-    padded_left = left + (0,) * (width - len(left))
-    padded_right = right + (0,) * (width - len(right))
-    if padded_left < padded_right:
-        return -1
-    if padded_left > padded_right:
-        return 1
-    return 0
+def _event_in_scope(event: dict[str, Any], intel: dict[str, Any]) -> bool:
+    if _advisory_empty(intel):
+        return True
+    if intel.get("cve_id") and event.get("cve_id") == intel["cve_id"]:
+        return True
+    software = event.get("software")
+    if intel.get("affected_software") and isinstance(software, str):
+        if software_matches(str(intel["affected_software"]), software):
+            return True
+    return any(ioc_in_line(ioc, str(event.get("text") or "")) for ioc in intel.get("iocs") or [])
 
 
-def software_matches(affected: str, installed: str) -> bool:
-    left = affected.casefold().strip()
-    right = installed.casefold().strip()
-    if not left or not right:
-        return False
-    return left in right or right in left
+def _advisory_empty(intel: dict[str, Any]) -> bool:
+    return not any(
+        [
+            intel.get("cve_id"),
+            intel.get("affected_software"),
+            intel.get("vulnerable_versions"),
+            intel.get("fixed_version"),
+            intel.get("iocs"),
+        ]
+    )
+
+
+def _evidence(logs: str, events: list[dict[str, Any]], intel: dict[str, Any]) -> list[str]:
+    wanted = {str(event["text"]) for event in events}
+    wanted.update(hunt_logs(intel.get("iocs") or [], logs))
+    evidence: list[str] = []
+    for line in logs.splitlines():
+        if line in wanted and line not in evidence:
+            evidence.append(line)
+    return evidence
+
+
+def hunt_logs(iocs: list[str], logs: str) -> list[str]:
+    evidence: list[str] = []
+    for line in logs.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "outcome=" in line:
+            continue
+        if any(ioc_in_line(ioc, line) for ioc in iocs):
+            evidence.append(line)
+    return evidence
 
 
 def ioc_in_line(ioc: str, line: str) -> bool:
     if IPV4_RE.fullmatch(ioc):
         return re.search(rf"(?<!\d){re.escape(ioc)}(?!\d)", line) is not None
     return ioc in line
+
+
+def _affected_hostnames(
+    intel: dict[str, Any],
+    inventory: list[dict[str, Any]],
+    findings: list[dict[str, Any]],
+) -> list[str]:
+    selected: list[str] = []
+    if intel.get("cve_id") in CVE_RULES:
+        vulnerable, _excluded = classify_cve(str(intel["cve_id"]), inventory)
+        selected.extend(str(item["hostname"]) for item in vulnerable)
+    elif intel.get("cve_id"):
+        selected.extend(str(item["hostname"]) for item in constraint_hosts(intel, inventory))
+    else:
+        for finding in findings:
+            for host in finding.get("affected_hosts") or []:
+                selected.append(str(host["hostname"]))
+    return _order_hosts(inventory, selected)
+
+
+def _order_hosts(inventory: list[dict[str, Any]], hostnames: list[str]) -> list[str]:
+    wanted = set(hostnames)
+    ordered: list[str] = []
+    for asset in inventory:
+        hostname = str(asset.get("hostname") or "")
+        if hostname in wanted and hostname not in ordered:
+            ordered.append(hostname)
+    for hostname in hostnames:
+        if hostname not in ordered:
+            ordered.append(hostname)
+    return ordered
+
+
+def _cve_ids(intel: dict[str, Any], findings: list[dict[str, Any]]) -> list[str]:
+    if intel.get("cve_id"):
+        return [str(intel["cve_id"])]
+    return _unique(str(item["cve_id"]) for item in findings if item.get("cve_id"))
+
+
+def _resolved_cve(intel: dict[str, Any], findings: list[dict[str, Any]]) -> str | None:
+    if intel.get("cve_id"):
+        return str(intel["cve_id"])
+    found = _unique(str(item["cve_id"]) for item in findings if item.get("cve_id"))
+    if len(found) == 1:
+        return found[0]
+    return None
+
+
+def _resolved_software(intel: dict[str, Any], cve_id: str | None) -> str | None:
+    if intel.get("affected_software"):
+        return str(intel["affected_software"])
+    if cve_id in CVE_RULES:
+        return CVE_RULES[cve_id].software
+    return None
+
+
+def _resolved_versions(intel: dict[str, Any], cve_id: str | None) -> str | None:
+    if intel.get("vulnerable_versions"):
+        return str(intel["vulnerable_versions"])
+    if cve_id in CVE_RULES:
+        return CVE_RULES[cve_id].vulnerable_text
+    return None
+
+
+def _resolved_iocs(intel: dict[str, Any], events: list[dict[str, Any]]) -> list[str]:
+    if intel.get("iocs"):
+        return list(intel["iocs"])
+    iocs = _unique(str(event["ip"]) for event in events)
+    for event in events:
+        indicator = event.get("indicator")
+        if indicator and indicator not in iocs:
+            iocs.append(str(indicator))
+    return iocs
+
+
+def _resolved_mitre(
+    intel: dict[str, Any], cve_id: str | None, findings: list[dict[str, Any]]
+) -> dict[str, str | None]:
+    if intel.get("cve_id"):
+        return map_mitre(intel)
+    if cve_id in CVE_RULES:
+        return dict(CVE_RULES[cve_id].mitre)
+    if intel.get("iocs"):
+        return dict(SCANNING)
+    if findings:
+        best = max(findings, key=lambda item: SEVERITY_RANK.get(str(item["severity"]), 0))
+        return dict(best["mitre_attack"])
+    return dict(EMPTY_MITRE)
+
+
+def _initial_severity(first: dict[str, Any], events: list[dict[str, Any]]) -> str:
+    if first.get("kind") == "exploit" and any(event.get("status") == "200" for event in events):
+        return "critical"
+    return str(first.get("base_severity") or "low")
+
+
+def _technique_mitre(event: dict[str, Any]) -> dict[str, str | None]:
+    return {
+        "tactic": event.get("tactic_name"),
+        "technique_id": event.get("technique_id"),
+        "technique_name": event.get("technique_name"),
+        "mitre_mitigation_id": "M1031",
+    }
+
+
+def _attach_finding_remediation(findings: list[dict[str, Any]], script: str) -> None:
+    for finding in findings:
+        cve_id = finding.get("cve_id") or "none"
+        chunks = []
+        for host in finding.get("affected_hosts") or []:
+            marker = f"##### host={host['hostname']} "
+            start = script.find(marker)
+            if start < 0:
+                continue
+            end = script.find("\n##### ", start + 1)
+            chunks.append(script[start:] if end < 0 else script[start:end])
+        if not chunks and cve_id in script:
+            chunks.append(script)
+        finding["remediation"] = "\n".join(chunks).strip()
+
+
+def _max_severity(values: list[str]) -> str | None:
+    ranked = [value for value in values if value in SEVERITY_RANK]
+    if not ranked:
+        return None
+    return max(ranked, key=lambda value: SEVERITY_RANK[value])
+
+
+def _unique(values: Any) -> list[str]:
+    result: list[str] = []
+    for value in values:
+        if value and value not in result:
+            result.append(value)
+    return result
+
+
+__all__ = [
+    "RESPONSE_FORMAT",
+    "extract_iocs",
+    "extract_threat_intel",
+    "generate_report",
+    "generate_report_html",
+    "map_mitre",
+    "run_hunt",
+    "simulate_script",
+]
